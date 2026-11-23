@@ -176,6 +176,7 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+  enrichments?: Record<string, RowEnrichment>;
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -609,6 +610,197 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
     if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) return `${r.slug} has implied value ${r.implied_value_usd}`;
   }
   return null;
+}
+
+/** The enrichment layer's own version label, carried into the summary and the dashboard data. */
+export const ENRICHMENT_VERSION = 'radar-2.1-enrichment';
+
+/**
+ * One category's context, as the enrichment layer reports it for a row: how many pre-token
+ * protocols share the category, how much TVL they hold together, the middle TVL among them, and
+ * the benchmark multiple the snapshot's own live-token protocols in that category imply.
+ */
+export interface CategoryContext {
+  category: string;
+  pre_token_count: number;
+  total_tvl_usd: number;
+  median_tvl_usd: number;
+  benchmark_multiple: number;
+  live_sample_count: number;
+}
+
+/** The extra fields the enrichment layer attaches to one board row, all derived, none scored. */
+export interface RowEnrichment {
+  slug: string;
+  confidence_score: number;
+  value_tier: string;
+  maturity_label: string;
+  chain_count: number;
+  category_context: CategoryContext;
+}
+
+/** The middle value of a list of numbers, or `fallback` when the list holds nothing. */
+function middleValue(values: number[], fallback: number): number {
+  if (values.length === 0) return fallback;
+  const ordered = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(ordered.length / 2);
+  return ordered.length % 2 === 1 ? ordered[mid]! : (ordered[mid - 1]! + ordered[mid]!) / 2;
+}
+
+/**
+ * How complete a row's own record is, from zero to one hundred. A row earns its points from
+ * what the snapshot actually carries for it: a positive TVL is worth 35, a recorded seven-day
+ * change is worth 20, a known category is worth 15, a listing date is worth 15, and chain
+ * breadth is worth up to 15, one quarter of it per chain up to four chains. A row with every
+ * field present scores 100; a row with only a TVL scores 35. Nothing here feeds back into the
+ * implied value, so the score can only describe a row, never move it.
+ */
+export function confidenceScore(row: BoardRow): number {
+  let points = 0;
+  if (row.tvl_usd > 0) points += 35;
+  if (row.change_7d !== null) points += 20;
+  if (row.category !== null && row.category !== '') points += 15;
+  if (row.listed_at !== null && row.listed_at !== '') points += 15;
+  const chainShare = 15 * Math.min(row.chains.length, 4) / 4;
+  return Math.round(points + chainShare);
+}
+
+/**
+ * The value tier a dollar figure falls into. The bands are wide on purpose: they are a reading
+ * aid for the dashboard, not a second ranking, and moving a band would never change a row's
+ * place on the board.
+ */
+export function valueTier(impliedUsd: number): string {
+  if (impliedUsd >= 500_000_000) return 'flagship';
+  if (impliedUsd >= 100_000_000) return 'major';
+  if (impliedUsd >= 25_000_000) return 'notable';
+  if (impliedUsd >= 5_000_000) return 'emerging';
+  return 'nascent';
+}
+
+/**
+ * The maturity label for an age in days. Three years with no token is seasoned, a year is
+ * established, half a year is maturing, anything younger is young, and a missing listing date
+ * says so instead of guessing.
+ */
+export function maturityLabel(ageDays: number | null): string {
+  if (ageDays === null) return 'unknown age';
+  if (ageDays >= 1095) return 'seasoned';
+  if (ageDays >= 365) return 'established';
+  if (ageDays >= 180) return 'maturing';
+  return 'young';
+}
+
+/**
+ * One context object per category on the board. The pre-token side comes from the board rows
+ * themselves: how many of them the category holds, their combined TVL, and the middle TVL
+ * among them. The benchmark side comes from the snapshot's live-token protocols in that same
+ * category: the median market-cap-per-TVL among them, read off the snapshot at run time, with
+ * the global median as the fallback when a category has fewer than three live samples. The
+ * benchmark is clamped to the same [0.05, 1.5] band the scoring multiple uses, so a thin
+ * category cannot report a wild benchmark. No number here is written by hand.
+ */
+export function buildCategoryContexts(rows: BoardRow[], snapshot: Snapshot): Map<string, CategoryContext> {
+  const liveByCategory = new Map<string, number[]>();
+  const liveAll: number[] = [];
+  for (const p of snapshot.protocols) {
+    if (isPreToken(p)) continue;
+    if (p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) continue;
+    const ratio = p.mcap_usd / p.tvl_usd;
+    liveAll.push(ratio);
+    const key = p.category ?? 'Other';
+    const bucket = liveByCategory.get(key);
+    if (bucket) bucket.push(ratio);
+    else liveByCategory.set(key, [ratio]);
+  }
+  const globalBenchmark = middleValue(liveAll, 0.25);
+  const grouped = new Map<string, BoardRow[]>();
+  for (const row of rows) {
+    const key = row.category ?? 'Other';
+    const bucket = grouped.get(key);
+    if (bucket) bucket.push(row);
+    else grouped.set(key, [row]);
+  }
+  const contexts = new Map<string, CategoryContext>();
+  const names = [...grouped.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const category of names) {
+    const members = grouped.get(category)!;
+    const tvls = members.map((r) => r.tvl_usd);
+    const samples = liveByCategory.get(category) ?? [];
+    const rawBenchmark = samples.length >= 3 ? middleValue(samples, globalBenchmark) : globalBenchmark;
+    contexts.set(category, {
+      category,
+      pre_token_count: members.length,
+      total_tvl_usd: tvls.reduce((sum, v) => sum + v, 0),
+      median_tvl_usd: middleValue(tvls, 0),
+      benchmark_multiple: Math.round(Math.min(1.5, Math.max(0.05, rawBenchmark)) * 1e4) / 1e4,
+      live_sample_count: samples.length,
+    });
+  }
+  return contexts;
+}
+
+/**
+ * The enrichment record for one row: its confidence score, its value tier, its maturity label,
+ * how many chains it runs on, and the context of its category. The category context falls back
+ * to the row's own figures when the category was never built, so this function always returns
+ * a complete record.
+ */
+export function enrichRow(row: BoardRow, contexts: Map<string, CategoryContext>): RowEnrichment {
+  const key = row.category ?? 'Other';
+  const context = contexts.get(key) ?? {
+    category: key,
+    pre_token_count: 1,
+    total_tvl_usd: row.tvl_usd,
+    median_tvl_usd: row.tvl_usd,
+    benchmark_multiple: row.model.category_multiple,
+    live_sample_count: 0,
+  };
+  return {
+    slug: row.slug,
+    confidence_score: confidenceScore(row),
+    value_tier: valueTier(row.implied_value_usd),
+    maturity_label: maturityLabel(row.age_days),
+    chain_count: row.chains.length,
+    category_context: context,
+  };
+}
+
+/** The enrichment layer's totals: how many board rows fall into each value tier, and the mean confidence. */
+export interface EnrichmentSummary {
+  tiers: Record<string, number>;
+  mean_confidence: number;
+  flagship_count: number;
+}
+
+/**
+ * The enrichment totals for a board: one count per value tier and the mean confidence score
+ * across every enriched row. Rows without an enrichment record are skipped, never guessed.
+ */
+export function summarizeEnrichments(rows: BoardRow[], enrichments: Record<string, RowEnrichment>): EnrichmentSummary {
+  const tiers: Record<string, number> = {};
+  let total = 0;
+  let counted = 0;
+  for (const row of rows) {
+    const e = enrichments[row.slug];
+    if (e === undefined) continue;
+    tiers[e.value_tier] = (tiers[e.value_tier] ?? 0) + 1;
+    total += e.confidence_score;
+    counted += 1;
+  }
+  return {
+    tiers,
+    mean_confidence: counted === 0 ? 0 : Math.round(total / counted),
+    flagship_count: tiers.flagship ?? 0,
+  };
+}
+
+/** The enrichment record for every board row, keyed by protocol slug. */
+export function buildEnrichments(rows: BoardRow[], snapshot: Snapshot): Record<string, RowEnrichment> {
+  const contexts = buildCategoryContexts(rows, snapshot);
+  const out: Record<string, RowEnrichment> = {};
+  for (const row of rows) out[row.slug] = enrichRow(row, contexts);
+  return out;
 }
 
 /** A compact data.js: the dashboard's whole dataset as one script, no fetch and no network. */

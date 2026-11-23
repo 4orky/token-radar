@@ -6,6 +6,7 @@
 
   var DATA = window.RADAR;
   if (!DATA) return;
+  var ENRICH = DATA.enrichments || {};
   var app = document.getElementById('board');
   var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
 
@@ -293,6 +294,17 @@
     );
   }
 
+  // The methodology note, rendered between the controls and the board table so the
+  // first screenshot shows the value model and the ranked rows together. It states
+  // the formula in plain language: TVL, priced at the category median, then growth,
+  // time with no token, and chain breadth. No protocol name is hardcoded.
+  function methodology() {
+    return el('section', { class: 'panel model', id: 'methodology', 'aria-labelledby': 'methodology-title' },
+      el('h2', { id: 'methodology-title', text: 'How the ranking works' }),
+      el('p', { text: "Implied value starts from a protocol's total value locked, priced at its category's median market cap per dollar of TVL, the median across that category's live-token protocols in this same snapshot. Seven-day growth nudges it up or down, longer running with no token counts as riper, and each extra chain adds a little. No protocol name is hardcoded: one formula scores every protocol." })
+    );
+  }
+
   function modelPanel() {
     var m = DATA.model;
     var cal = DATA.calibration;
@@ -343,6 +355,103 @@
     );
   }
 
+  // One labelled value for the detail view's equation grid: a plain label and a bold figure.
+  function detailRow(label, value) {
+    return el('div', null, el('span', { text: label }), el('b', { class: 'num', text: value }));
+  }
+
+  // One sentence that reads a row's enrichment aloud: its tier, its maturity, and how
+  // completely its record is documented, so the numbers above it have a plain-language form.
+  function enrichmentNote(row, enrichment) {
+    var band = enrichment.confidence_score >= 80 ? 'well documented' : enrichment.confidence_score >= 60 ? 'partly documented' : 'thinly documented';
+    var tierWord = enrichment.value_tier === 'flagship' ? 'one of the largest implied values on the board'
+      : enrichment.value_tier === 'major' ? 'a large implied value'
+      : enrichment.value_tier === 'notable' ? 'a mid-sized implied value'
+      : enrichment.value_tier === 'emerging' ? 'a modest implied value'
+      : 'a small implied value';
+    var ageWord = enrichment.maturity_label === 'unknown age' ? 'with no listing date on record'
+      : 'after running ' + fmtAge(row.age_days) + ' with no token';
+    return row.name + ' carries ' + tierWord + ' at ' + fmtUsd(row.implied_value_usd) + ', ' + ageWord +
+      ', on ' + enrichment.chain_count + ' chain' + (enrichment.chain_count === 1 ? '' : 's') +
+      '. Its record is ' + band + ' at ' + enrichment.confidence_score + ' out of 100, and its category holds ' +
+      (enrichment.category_context.pre_token_count || 'n/a') + ' pre-token protocols.';
+  }
+
+  // The enrichment block for one protocol's detail view: the confidence score, the value tier,
+  // the maturity label, and the context of its category, each with a plain label. The confidence
+  // score is a completeness read of the row's own record, out of 100: a positive TVL is worth
+  // 35, a recorded seven-day change 20, a known category 15, a listing date 15, and chain
+  // breadth up to 15. It describes the row; it never moves its rank.
+  function enrichmentSection(row) {
+    var enrichment = ENRICH[row.slug];
+    if (!enrichment) return null;
+    var ctx = enrichment.category_context || {};
+    var count = ctx.pre_token_count === undefined || ctx.pre_token_count === null ? 'n/a' : String(ctx.pre_token_count);
+    var total = ctx.total_tvl_usd === undefined || ctx.total_tvl_usd === null ? 'n/a' : fmtUsd(ctx.total_tvl_usd);
+    var medianTvl = ctx.median_tvl_usd === undefined || ctx.median_tvl_usd === null ? 'n/a' : fmtUsd(ctx.median_tvl_usd);
+    var benchmark = ctx.benchmark_multiple === undefined || ctx.benchmark_multiple === null ? 'n/a' : String(ctx.benchmark_multiple) + 'x';
+    var samples = ctx.live_sample_count === undefined || ctx.live_sample_count === null ? 'n/a' : String(ctx.live_sample_count);
+    return el('section', { class: 'detail-section' },
+      el('h3', { text: 'Enrichment' }),
+      el('div', { class: 'equation' },
+        detailRow('Confidence score', String(enrichment.confidence_score) + ' / 100'),
+        detailRow('Value tier', enrichment.value_tier),
+        detailRow('Maturity label', enrichment.maturity_label),
+        detailRow('Chains', String(enrichment.chain_count)),
+        detailRow('Protocols in this category', count),
+        detailRow('Category total TVL', total),
+        detailRow('Category median TVL', medianTvl),
+        detailRow('Category benchmark multiple', benchmark)
+      ),
+      el('p', { class: 'sub', text: enrichmentNote(row, enrichment) }),
+      el('p', { class: 'sub', text: 'The benchmark multiple is the median market cap per dollar of TVL of the ' + samples + ' live-token protocol' + (samples === '1' ? '' : 's') + ' in this category in the same snapshot, clamped to the model band of 0.05x to 1.5x. The tier is a reading aid only: flagship is $500M and up, major $100M, notable $25M, emerging $5M, and anything below that nascent.' })
+    );
+  }
+
+  // The category breakdown lives outside the board shell, in the empty container the page
+  // carries for it. It groups the pre-token rows by category and lists each category with its
+  // protocol count and its total implied value, largest total first, with a bar scaled to the
+  // largest category so the spread across lines of business is visible at a glance.
+  function fillCategoryBreakdown() {
+    var host = document.getElementById('category-breakdown');
+    if (!host) return;
+    host.textContent = '';
+    var grouped = {};
+    DATA.rows.forEach(function (r) {
+      var c = r.category || 'Other';
+      if (!grouped[c]) grouped[c] = { category: c, count: 0, total: 0, topName: '', topValue: 0, values: [] };
+      grouped[c].count += 1;
+      grouped[c].total += r.implied_value_usd;
+      grouped[c].values.push(r.implied_value_usd);
+      if (r.implied_value_usd > grouped[c].topValue) { grouped[c].topValue = r.implied_value_usd; grouped[c].topName = r.name; }
+    });
+    var list = Object.keys(grouped).map(function (k) {
+      var item = grouped[k];
+      var ordered = item.values.slice().sort(function (a, b) { return a - b; });
+      var mid = Math.floor(ordered.length / 2);
+      item.median = ordered.length % 2 === 1 ? ordered[mid] : (ordered[mid - 1] + ordered[mid]) / 2;
+      return item;
+    });
+    list.sort(function (a, b) {
+      if (b.total !== a.total) return b.total - a.total;
+      return a.category < b.category ? -1 : a.category > b.category ? 1 : 0;
+    });
+    var max = list.length ? list[0].total : 1;
+    var grand = list.reduce(function (sum, item) { return sum + item.total; }, 0);
+    var heading = el('h2', { text: 'Implied value by category' });
+    var intro = el('p', { class: 'sub', text: 'The ' + DATA.board_size + ' pre-token rows grouped by line of business, largest total implied value first. Together they imply ' + fmtUsd(grand) + ' across ' + list.length + ' categories.' });
+    var wrap = el('div', { class: 'catbars' }, list.map(function (item) {
+      var share = grand > 0 ? Math.round((item.total / grand) * 100) : 0;
+      return el('div', { class: 'catbar' },
+        el('span', { class: 'catname', text: item.category + ' (' + item.count + ' protocol' + (item.count === 1 ? '' : 's') + ', ' + share + '% of the board)' }),
+        el('span', { class: 'sub', text: 'Largest: ' + item.topName + ' at ' + fmtUsd(item.topValue) + ' · median row ' + fmtUsd(item.median) }),
+        el('div', { class: 'bar wide', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((item.total / max) * 100)) + '%' })),
+        el('span', { class: 'num', text: fmtUsd(item.total) })
+      );
+    }));
+    host.appendChild(el('section', { class: 'panel model' }, heading, intro, wrap));
+  }
+
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
 
@@ -375,6 +484,8 @@
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
+    var enrichmentBlock = enrichmentSection(row);
+    if (enrichmentBlock) dialog.appendChild(enrichmentBlock);
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
@@ -397,11 +508,13 @@
     shell.appendChild(header());
     shell.appendChild(lede());
     shell.appendChild(controls());
+    if (state.tab === 'pre-token') shell.appendChild(methodology());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') { shell.appendChild(modelPanel()); shell.appendChild(categoryBars()); }
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);
+    fillCategoryBreakdown();
     if (state.selected) openDetail(state.selected);
   }
 

@@ -70,6 +70,9 @@ a { color: var(--accent); }
   background: var(--surface); min-width: 180px;
 }
 .field input { min-width: 280px; }
+.field input[type="checkbox"] { min-width: 0; width: 16px; height: 16px; min-height: 0; padding: 0; border: 0; background: transparent; border-radius: 0; flex: none; }
+.check { display: inline-flex; align-items: center; gap: var(--step-2); min-height: 36px; font-size: 13px; cursor: pointer; justify-self: start; }
+.check input { accent-color: var(--accent); }
 .tabs { display: flex; gap: var(--step-1); padding: 3px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); }
 .tabs button { min-height: 30px; padding: 0 var(--step-3); border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
 .tabs button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }

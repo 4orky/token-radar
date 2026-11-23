@@ -171,6 +171,9 @@ export interface RadarData {
   model_version: string;
   calibration: Calibration;
   watchlist_size: number;
+  // The watchlist's slugs, so the dashboard can offer a watchlist-only view without
+  // re-deriving membership: a row is on the watchlist exactly when its slug is in here.
+  watchlist_slugs: string[];
   board_size: number;
   early_size: number;
   live_size: number;
@@ -540,6 +543,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
       byCategory: calibration.byCategory.filter((c) => boardCats.has(c.category)),
     },
     watchlist_size: snapshot.watchlist.length,
+    watchlist_slugs: snapshot.watchlist.slice(),
     board_size: board.length,
     early_size: early,
     live_size: live.length,

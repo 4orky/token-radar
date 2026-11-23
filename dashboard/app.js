@@ -8,7 +8,33 @@
   if (!DATA) return;
   var ENRICH = DATA.enrichments || {};
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', chain: 'all', tier: 'all', watchlistOnly: false, tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+
+  // The value tiers the enrichment layer assigns, largest implied value first, so the
+  // tier filter lists them in the same order the board reads them.
+  var TIER_ORDER = ['flagship', 'major', 'notable', 'emerging', 'nascent'];
+
+  // Every chain the board's rows run on, sorted, for the chain filter: derived from the
+  // rows themselves, so a snapshot with a new chain lists it with no code change.
+  function allChains() {
+    var seen = {};
+    DATA.rows.forEach(function (r) { (r.chains || []).forEach(function (c) { seen[c] = true; }); });
+    return Object.keys(seen).sort();
+  }
+
+  // A row's value tier from its enrichment record; a row with no enrichment reads as
+  // nascent, the smallest tier, so the filter never drops a row for missing data.
+  function tierOf(row) {
+    var e = ENRICH[row.slug];
+    return e && e.value_tier ? e.value_tier : 'nascent';
+  }
+
+  // Whether a row is one of the 40 watchlist protocols: its slug is in the list main.ts
+  // writes beside the board, so the watchlist-only view needs no second source of truth.
+  function isWatchlist(row) {
+    var slugs = DATA.watchlist_slugs || [];
+    return slugs.indexOf(row.slug) >= 0;
+  }
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -127,11 +153,17 @@
     if (params.get('q')) state.q = params.get('q');
     if (params.get('p')) state.selected = params.get('p');
     if (params.get('category')) state.category = params.get('category');
+    if (params.get('chain')) state.chain = params.get('chain');
+    if (params.get('tier')) state.tier = params.get('tier');
+    if (params.get('wl') === '1') state.watchlistOnly = true;
   }
   function writeHash() {
     var params = new URLSearchParams();
     if (state.q) params.set('q', state.q);
     if (state.category !== 'all') params.set('category', state.category);
+    if (state.chain !== 'all') params.set('chain', state.chain);
+    if (state.tier !== 'all') params.set('tier', state.tier);
+    if (state.watchlistOnly) params.set('wl', '1');
     if (state.selected) params.set('p', state.selected);
     var next = params.toString();
     if (next) window.history.replaceState(null, '', '#' + next);
@@ -142,10 +174,31 @@
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
       if (state.category !== 'all' && r.category !== state.category) return false;
+      if (state.chain !== 'all' && (r.chains || []).indexOf(state.chain) < 0) return false;
+      if (state.tier !== 'all' && tierOf(r) !== state.tier) return false;
+      if (state.watchlistOnly && !isWatchlist(r)) return false;
       if (!q) return true;
       var hay = [r.name, r.slug, r.category, (r.chains || []).join(' ')].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
     });
+  }
+
+  // How many of the board's rows survive the filters, and how many the watchlist holds,
+  // so the count line under the controls always says what the filters are doing.
+  function filterSummary() {
+    var shown = rows().length;
+    var total = DATA.rows.length;
+    var wl = (DATA.watchlist_slugs || []).length;
+    var active = [];
+    if (state.category !== 'all') active.push(state.category);
+    if (state.chain !== 'all') active.push(state.chain);
+    if (state.tier !== 'all') active.push(state.tier + ' tier');
+    if (state.watchlistOnly) active.push('watchlist only');
+    if (state.q.trim()) active.push('"' + state.q.trim() + '"');
+    var label = shown + ' of ' + total + ' rows shown';
+    if (active.length > 0) label += ' (' + active.join(' + ') + ')';
+    if (state.watchlistOnly) label += ' of ' + wl + ' watchlist protocols';
+    return label;
   }
   function sortedRows(list) {
     var key = state.sort;
@@ -190,6 +243,7 @@
 
   function controls() {
     var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
+    var chains = allChains();
     var search = el('input', { type: 'search', id: 'q', placeholder: 'Search name, category or chain', value: state.q, 'aria-label': 'Search the board' });
     search.addEventListener('input', function () { state.q = search.value; writeHash(); render(); });
     var select = el('select', { id: 'category', 'aria-label': 'Filter by category' },
@@ -197,13 +251,27 @@
       categories.map(function (c) { return el('option', { value: c, text: c, selected: c === state.category ? 'selected' : null }); })
     );
     select.addEventListener('change', function () { state.category = select.value; writeHash(); render(); });
+    var chainSelect = el('select', { id: 'chain', 'aria-label': 'Filter by chain' },
+      el('option', { value: 'all', text: 'All chains' }),
+      chains.map(function (c) { return el('option', { value: c, text: c, selected: c === state.chain ? 'selected' : null }); })
+    );
+    chainSelect.addEventListener('change', function () { state.chain = chainSelect.value; writeHash(); render(); });
+    var tierSelect = el('select', { id: 'tier', 'aria-label': 'Filter by value tier' },
+      el('option', { value: 'all', text: 'All tiers' }),
+      TIER_ORDER.map(function (t) { return el('option', { value: t, text: t + ' tier', selected: t === state.tier ? 'selected' : null }); })
+    );
+    tierSelect.addEventListener('change', function () { state.tier = tierSelect.value; writeHash(); render(); });
+    var watchlistBox = el('input', { type: 'checkbox', id: 'watchlist-only', checked: state.watchlistOnly ? 'checked' : null, onchange: function () { state.watchlistOnly = watchlistBox.checked; writeHash(); render(); } });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
+      el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chainSelect),
+      el('div', { class: 'field' }, el('label', { for: 'tier', text: 'Value tier' }), tierSelect),
+      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Watchlist' }), el('label', { class: 'check' }, watchlistBox, 'Watchlist only')),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
+      el('span', { class: 'count', text: state.tab === 'pre-token' ? filterSummary() : DATA.live.length + ' live-token protocols' })
     );
   }
 
@@ -222,7 +290,7 @@
       return el('div', { class: 'panel' }, el('div', { class: 'empty' },
         el('h2', { text: 'No protocol matches that filter' }),
         el('p', { text: 'Clear the search or pick another category to see the board again.' }),
-        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; writeHash(); render(); } })
+        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; state.chain = 'all'; state.tier = 'all'; state.watchlistOnly = false; writeHash(); render(); } })
       ));
     }
     var max = list[0].implied_value_usd || 1;
@@ -355,6 +423,31 @@
     );
   }
 
+  // The category leaders: the single strongest protocol in each line of business, by
+  // implied value, so a reader can see at a glance which name leads lending, which leads
+  // bridges, and so on, without sorting the whole board. The leader is the row with the
+  // largest implied value in its category; ties are impossible, ranks are unique.
+  function categoryLeaders() {
+    var best = {};
+    DATA.rows.forEach(function (r) {
+      var c = r.category || 'Other';
+      if (!best[c] || r.implied_value_usd > best[c].implied_value_usd) best[c] = r;
+    });
+    var list = Object.keys(best).map(function (c) { return best[c]; }).sort(function (a, b) { return b.implied_value_usd - a.implied_value_usd; });
+    var max = list.length ? list[0].implied_value_usd : 1;
+    return el('section', { class: 'panel model' },
+      el('h2', { text: 'Category leaders' }),
+      el('p', { class: 'sub', text: 'The strongest pre-token protocol in each line of business, by implied value. ' + list.length + ' categories, one leader each.' }),
+      el('div', { class: 'catbars' }, list.map(function (r) {
+        return el('div', { class: 'catbar' },
+          el('span', { class: 'catname', text: (r.category || 'Other') + ': ' + r.name + ' (#' + r.rank + ')' }),
+          el('div', { class: 'bar wide', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
+          el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
+        );
+      }))
+    );
+  }
+
   // One labelled value for the detail view's equation grid: a plain label and a bold figure.
   function detailRow(label, value) {
     return el('div', null, el('span', { text: label }), el('b', { class: 'num', text: value }));
@@ -452,6 +545,47 @@
     host.appendChild(el('section', { class: 'panel model' }, heading, intro, wrap));
   }
 
+  // The farm plan in one box: what it takes to farm this protocol, read off the same
+  // figures the steps use. Capital and setup gas follow the TVL bands; the weekly gas
+  // is $2 a week for the hold, so the gas over the hold is the setup plus the weeks held.
+  function farmSummary(row) {
+    var chain = chainOf(row);
+    var capital = capitalFor(row);
+    var hold = holdDaysFor(row.age_days);
+    var setupGas = capital >= 150 ? 8 : 4;
+    var weeks = Math.max(1, Math.ceil(hold / 7));
+    var weeklyGas = 2 * weeks;
+    var totalGas = setupGas + weeklyGas;
+    return el('section', { class: 'detail-section' },
+      el('h3', { text: 'What farming it takes' }),
+      el('div', { class: 'equation' },
+        detailRow('Capital to commit', '$' + capital),
+        detailRow('Setup gas', 'about $' + setupGas),
+        detailRow('Weekly gas', 'about $2 a week'),
+        detailRow('Hold', hold + ' days (' + weeks + ' weeks)'),
+        detailRow('Gas over the hold', 'about $' + totalGas),
+        detailRow('Main chain', chain)
+      ),
+      el('p', { class: 'sub', text: 'The capital stays in the position for the hold; the gas is the cost of the transactions. A fresh wallet holds only these funds, and the claim comes only from the link the protocol itself publishes.' })
+    );
+  }
+
+  // Where this row sits on the board: its percentile, the median implied value of its
+  // own category, and how far it is from the board's top row, so the rank reads as a
+  // position, not just a number.
+  function rankContext(row) {
+    var top = DATA.rows.filter(function (r) { return r.rank === 1; })[0];
+    var same = DATA.rows.filter(function (r) { return (r.category || 'Other') === (row.category || 'Other'); }).map(function (r) { return r.implied_value_usd; }).sort(function (a, b) { return a - b; });
+    var mid = Math.floor(same.length / 2);
+    var medianValue = same.length % 2 === 1 ? same[mid] : (same[mid - 1] + same[mid]) / 2;
+    var percentile = Math.round(((DATA.board_size - row.rank + 1) / DATA.board_size) * 100);
+    var share = top ? Math.round((row.implied_value_usd / top.implied_value_usd) * 100) : 0;
+    return el('section', { class: 'detail-section' },
+      el('h3', { text: 'Where this rank sits' }),
+      el('p', { class: 'sub', text: row.name + ' is rank ' + row.rank + ' of ' + DATA.board_size + ', the top ' + percentile + '% of the board. Its category median is ' + fmtUsd(medianValue) + ', and it carries ' + share + '% of the top row' + (top ? ' (' + top.name + ' at ' + fmtUsd(top.implied_value_usd) + ')' : '') + '.' })
+    );
+  }
+
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
 
@@ -486,6 +620,7 @@
     ));
     var enrichmentBlock = enrichmentSection(row);
     if (enrichmentBlock) dialog.appendChild(enrichmentBlock);
+    dialog.appendChild(rankContext(row));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
@@ -495,6 +630,7 @@
         return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
       }))
     ));
+    dialog.appendChild(farmSummary(row));
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
     } else {
@@ -510,7 +646,7 @@
     shell.appendChild(controls());
     if (state.tab === 'pre-token') shell.appendChild(methodology());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
-    if (state.tab === 'pre-token') { shell.appendChild(modelPanel()); shell.appendChild(categoryBars()); }
+    if (state.tab === 'pre-token') { shell.appendChild(modelPanel()); shell.appendChild(categoryBars()); shell.appendChild(categoryLeaders()); }
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);
